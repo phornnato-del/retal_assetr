@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server'
 import type { NextRequest } from 'next/server'
 import { db } from '@/lib/db'
 import { hashPassword } from '@/lib/auth'
-import { setOtpForEmail, sendEmailOtp } from '@/lib/email-otp'
+import { setOtpForEmail, sendEmailOtp, clearOtpForEmail } from '@/lib/email-otp'
 
 export async function POST(request: NextRequest) {
   try {
@@ -43,21 +43,42 @@ export async function POST(request: NextRequest) {
 
     const avatarUrl = `https://api.dicebear.com/9.x/avataaars/svg?seed=${encodeURIComponent(cleanName)}&backgroundColor=b6e3f4`
 
-    const newUser = await db.user.create({
-      data: {
-        email: cleanEmail,
-        name: cleanName,
-        phone: cleanPhone || null,
-        passwordHash,
-        avatar: avatarUrl,
-        role: 'client',
-        status: 'PENDING_VERIFICATION',
-        lastLoginAt: null,
-      },
-    })
+    let newUser
 
-    const code = setOtpForEmail(cleanEmail, newUser.id)
-    await sendEmailOtp(cleanEmail, code)
+    try {
+      newUser = await db.user.create({
+        data: {
+          email: cleanEmail,
+          name: cleanName,
+          phone: cleanPhone || null,
+          passwordHash,
+          avatar: avatarUrl,
+          role: 'client',
+          status: 'PENDING_VERIFICATION',
+          lastLoginAt: null,
+        },
+      })
+
+      const code = setOtpForEmail(cleanEmail, newUser.id)
+      await sendEmailOtp(cleanEmail, code)
+    } catch (error) {
+      if (newUser?.id) {
+        try {
+          await db.user.delete({ where: { id: newUser.id } })
+        } catch (deleteError) {
+          console.error('Failed to rollback created user after registration OTP failure:', deleteError)
+        }
+      }
+
+      clearOtpForEmail(cleanEmail)
+
+      console.error('Registration setup failed. Rolled back user creation:', error)
+
+      return NextResponse.json(
+        { error: 'We could not send the verification code. Please try again.' },
+        { status: 500 }
+      )
+    }
 
     return NextResponse.json({
       ok: true,

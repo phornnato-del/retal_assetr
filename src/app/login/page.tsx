@@ -291,16 +291,20 @@ function CustomerLoginForm() {
             </div>
           )}
 
-          {verificationPending && (
-            <div className="mb-5 rounded-2xl border border-emerald-300/30 bg-emerald-500/10 p-4 text-white/90">
-              <div className="flex items-center gap-2 text-sm font-semibold text-emerald-200">
-                <ShieldCheck className="h-4 w-4" />
-                Email verification required
+          {verificationPending ? (
+            <div className="rounded-[28px] border border-emerald-300/30 bg-white/5 p-5 shadow-2xl shadow-emerald-950/20 backdrop-blur-sm">
+              <div className="flex items-center justify-center mb-4">
+                <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-emerald-500/15 text-emerald-200 ring-1 ring-emerald-300/30">
+                  <ShieldCheck className="h-6 w-6" />
+                </div>
               </div>
-              <p className="mt-2 text-xs text-emerald-50/80">
-                We sent a 6-digit code to <span className="font-semibold">{pendingEmail || regEmail}</span>.
+
+              <h2 className="text-center text-2xl font-bold tracking-tight text-white">Verify your email</h2>
+              <p className="mt-2 text-center text-sm text-emerald-50/80">
+                We sent a 6-digit code to <span className="font-semibold text-white">{pendingEmail || regEmail}</span>
               </p>
-              <div className="mt-4 flex justify-center">
+
+              <div className="mt-5 flex justify-center">
                 <InputOTP
                   maxLength={6}
                   value={otp}
@@ -308,37 +312,44 @@ function CustomerLoginForm() {
                   containerClassName="gap-2"
                 >
                   <InputOTPGroup>
-                    <InputOTPSlot index={0} className="h-11 w-11 rounded-lg border-white/20 bg-[#0b3d25] text-lg text-white" />
-                    <InputOTPSlot index={1} className="h-11 w-11 rounded-lg border-white/20 bg-[#0b3d25] text-lg text-white" />
-                    <InputOTPSlot index={2} className="h-11 w-11 rounded-lg border-white/20 bg-[#0b3d25] text-lg text-white" />
-                    <InputOTPSlot index={3} className="h-11 w-11 rounded-lg border-white/20 bg-[#0b3d25] text-lg text-white" />
-                    <InputOTPSlot index={4} className="h-11 w-11 rounded-lg border-white/20 bg-[#0b3d25] text-lg text-white" />
-                    <InputOTPSlot index={5} className="h-11 w-11 rounded-lg border-white/20 bg-[#0b3d25] text-lg text-white" />
+                    <InputOTPSlot index={0} className="h-12 w-12 rounded-xl border-white/20 bg-[#0b3d25] text-xl font-semibold text-white" />
+                    <InputOTPSlot index={1} className="h-12 w-12 rounded-xl border-white/20 bg-[#0b3d25] text-xl font-semibold text-white" />
+                    <InputOTPSlot index={2} className="h-12 w-12 rounded-xl border-white/20 bg-[#0b3d25] text-xl font-semibold text-white" />
+                    <InputOTPSlot index={3} className="h-12 w-12 rounded-xl border-white/20 bg-[#0b3d25] text-xl font-semibold text-white" />
+                    <InputOTPSlot index={4} className="h-12 w-12 rounded-xl border-white/20 bg-[#0b3d25] text-xl font-semibold text-white" />
+                    <InputOTPSlot index={5} className="h-12 w-12 rounded-xl border-white/20 bg-[#0b3d25] text-xl font-semibold text-white" />
                   </InputOTPGroup>
                 </InputOTP>
               </div>
-              <div className="mt-4 flex gap-2">
-                <button
-                  type="button"
-                  onClick={handleVerifyOtp}
-                  disabled={loading || otp.length !== 6}
-                  className="flex-1 rounded-xl bg-[#16a34a] px-3 py-2 text-xs font-semibold text-white disabled:opacity-50"
-                >
-                  Verify email
-                </button>
+
+              <button
+                type="button"
+                onClick={handleVerifyOtp}
+                disabled={loading || otp.length !== 6}
+                className="mt-5 w-full rounded-xl bg-[#16a34a] px-4 py-3 text-sm font-semibold text-white transition hover:bg-[#15803d] disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {loading ? 'Verifying…' : 'Verify code'}
+              </button>
+
+              <div className="mt-4 flex items-center justify-between gap-3 rounded-xl border border-white/10 bg-black/10 px-3 py-2 text-xs text-white/70">
+                <span>Didn’t receive the code?</span>
                 <button
                   type="button"
                   onClick={handleResendOtp}
                   disabled={resendCooldown > 0 || loading}
-                  className="rounded-xl border border-white/20 bg-white/5 px-3 py-2 text-xs font-medium text-white disabled:opacity-50"
+                  className="font-semibold text-emerald-200 disabled:opacity-50"
                 >
-                  {resendCooldown > 0 ? `Resend (${resendCooldown}s)` : 'Resend'}
+                  {resendCooldown > 0 ? `Resend in ${resendCooldown}s` : 'Resend'}
                 </button>
               </div>
-            </div>
-          )}
 
-          {mode === 'login' ? (
+              {error && (
+                <p className="mt-4 text-xs text-red-200 bg-red-500/10 border border-red-400/20 rounded-xl px-3 py-2">
+                  {error}
+                </p>
+              )}
+            </div>
+          ) : mode === 'login' ? (
             <form onSubmit={handleLogin} className="space-y-4">
               <div>
                 <label className="block text-xs font-medium text-white/70 mb-1.5">

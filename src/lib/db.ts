@@ -1,4 +1,4 @@
-import { PrismaClient } from '@/lib/prisma-client-v6'
+import { PrismaClient } from '@prisma/client'
 
 const databaseUrl =
   process.env.DATABASE_URL ||

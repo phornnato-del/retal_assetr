@@ -58,6 +58,13 @@ export async function POST(request: NextRequest) {
       )
     }
 
+    if (user.status === 'PENDING_VERIFICATION') {
+      return NextResponse.json(
+        { error: `Your email is still pending verification. Please verify the code sent to ${user.email}.` },
+        { status: 403 }
+      )
+    }
+
     if (user.status === 'SUSPENDED') {
       return NextResponse.json(
         { error: 'Your account has been suspended. Please contact support.' },

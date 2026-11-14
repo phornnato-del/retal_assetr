@@ -1,14 +1,14 @@
 import { NextResponse } from 'next/server'
 import type { NextRequest } from 'next/server'
 import { db } from '@/lib/db'
-import { hashPassword, createClientToken, setClientSessionCookie } from '@/lib/auth'
+import { hashPassword } from '@/lib/auth'
+import { setOtpForEmail, sendEmailOtp } from '@/lib/email-otp'
 
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
     const { email, password, name, phone } = body
 
-    // Validation
     const cleanEmail = (email || '').trim().toLowerCase()
     const cleanName = (name || '').trim()
     const cleanPhone = (phone || '').trim()
@@ -28,7 +28,6 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Check if user already exists
     const existing = await db.user.findUnique({
       where: { email: cleanEmail },
     })
@@ -40,13 +39,10 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Hash password
     const passwordHash = await hashPassword(password)
 
-    // Generate avatar seed
     const avatarUrl = `https://api.dicebear.com/9.x/avataaars/svg?seed=${encodeURIComponent(cleanName)}&backgroundColor=b6e3f4`
 
-    // Create user in database
     const newUser = await db.user.create({
       data: {
         email: cleanEmail,
@@ -55,23 +51,17 @@ export async function POST(request: NextRequest) {
         passwordHash,
         avatar: avatarUrl,
         role: 'client',
-        status: 'ACTIVE',
-        lastLoginAt: new Date(),
+        status: 'PENDING_VERIFICATION',
+        lastLoginAt: null,
       },
     })
 
-    // Create client session JWT
-    const token = await createClientToken({
-      sub: newUser.id,
-      email: newUser.email,
-      name: newUser.name,
-      role: 'client',
-      avatar: newUser.avatar,
-    }, '24h')
+    const code = setOtpForEmail(cleanEmail, newUser.id)
+    await sendEmailOtp(cleanEmail, code)
 
-    const response = NextResponse.json({
+    return NextResponse.json({
       ok: true,
-      message: 'Account created successfully.',
+      message: 'Account created. We sent a 6-digit verification code to your email.',
       user: {
         id: newUser.id,
         email: newUser.email,
@@ -80,11 +70,6 @@ export async function POST(request: NextRequest) {
         avatar: newUser.avatar,
       },
     })
-
-    // Set secure HTTP-only client session cookie
-    setClientSessionCookie(response, token)
-
-    return response
   } catch (error: any) {
     console.error('Registration error:', error)
     return NextResponse.json(

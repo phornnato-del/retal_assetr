@@ -1,9 +1,10 @@
 'use client'
 
-import { useState, Suspense } from 'react'
+import { useState, Suspense, useEffect } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import Link from 'next/link'
-import { Eye, EyeOff, Boxes, UserCheck, ArrowLeft, UserPlus, Mail, Lock, User, Phone, Clock } from 'lucide-react'
+import { Eye, EyeOff, Boxes, UserCheck, ArrowLeft, UserPlus, Clock, ShieldCheck } from 'lucide-react'
+import { InputOTP, InputOTPGroup, InputOTPSlot } from '@/components/ui/input-otp'
 
 function CustomerLoginForm() {
   const router = useRouter()
@@ -13,12 +14,10 @@ function CustomerLoginForm() {
 
   const [mode, setMode] = useState<'login' | 'register'>('login')
 
-  // Login form state
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [showPw, setShowPw] = useState(false)
 
-  // Registration form state
   const [regName, setRegName] = useState('')
   const [regEmail, setRegEmail] = useState('')
   const [regPhone, setRegPhone] = useState('')
@@ -26,15 +25,26 @@ function CustomerLoginForm() {
   const [regConfirmPassword, setRegConfirmPassword] = useState('')
   const [showRegPw, setShowRegPw] = useState(false)
 
+  const [verificationPending, setVerificationPending] = useState(false)
+  const [pendingEmail, setPendingEmail] = useState('')
+  const [otp, setOtp] = useState('')
+  const [resendCooldown, setResendCooldown] = useState(0)
+
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+
+  useEffect(() => {
+    if (resendCooldown <= 0) return
+    const timer = window.setTimeout(() => setResendCooldown((value) => value - 1), 1000)
+    return () => window.clearTimeout(timer)
+  }, [resendCooldown])
 
   const handleLogin = async (e?: React.FormEvent, directUsername?: string, directPassword?: string) => {
     if (e) e.preventDefault()
     setError('')
     setLoading(true)
 
-    const identityToUse = directUsername || username
+    const identityToUse = (directUsername || username || '').trim()
     const passwordToUse = directPassword || password
 
     try {
@@ -52,6 +62,12 @@ function CustomerLoginForm() {
       if (res.ok) {
         window.location.href = from || '/'
       } else {
+        if (res.status === 403 && data.error?.toLowerCase().includes('verify')) {
+          setVerificationPending(true)
+          setPendingEmail(identityToUse)
+          setOtp('')
+          setMode('login')
+        }
         setError(data.error || 'Invalid credentials. Please try again.')
       }
     } catch {
@@ -59,6 +75,33 @@ function CustomerLoginForm() {
     } finally {
       setLoading(false)
     }
+  }
+
+  const handleSendOtp = async (email: string) => {
+    if (!email || !email.includes('@')) {
+      setError('Please provide a valid email address.')
+      return
+    }
+
+    const response = await fetch('/api/auth/send-otp', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email }),
+    })
+
+    const data = await response.json()
+
+    if (!response.ok) {
+      setError(data.error || 'Unable to send OTP right now.')
+      return false
+    }
+
+    setVerificationPending(true)
+    setPendingEmail(email)
+    setOtp('')
+    setResendCooldown(30)
+    setError(data.message || 'Verification code sent.')
+    return true
   }
 
   const handleRegister = async (e: React.FormEvent) => {
@@ -92,7 +135,11 @@ function CustomerLoginForm() {
       const data = await res.json()
 
       if (res.ok) {
-        window.location.href = from || '/'
+        setVerificationPending(true)
+        setPendingEmail(regEmail.trim().toLowerCase())
+        setOtp('')
+        setResendCooldown(30)
+        setError(data.message || 'Account created. Please verify your email.')
       } else {
         setError(data.error || 'Registration failed. Please try again.')
       }
@@ -103,11 +150,54 @@ function CustomerLoginForm() {
     }
   }
 
+  const handleVerifyOtp = async () => {
+    const email = pendingEmail || regEmail
+    if (!email || otp.length !== 6) {
+      setError('Please enter the 6-digit verification code.')
+      return
+    }
+
+    setLoading(true)
+    setError('')
+
+    try {
+      const res = await fetch('/api/auth/verify-otp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, code: otp }),
+      })
+
+      const data = await res.json()
+
+      if (res.ok) {
+        setVerificationPending(false)
+        setError('')
+        setOtp('')
+        window.location.href = from || '/'
+      } else {
+        setError(data.error || 'Verification failed. Please try again.')
+      }
+    } catch {
+      setError('Unable to verify the code right now. Please try again.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleResendOtp = async () => {
+    if (resendCooldown > 0) return
+    const email = pendingEmail || regEmail
+    if (!email) {
+      setError('Please provide your email first.')
+      return
+    }
+
+    await handleSendOtp(email)
+  }
+
   return (
     <div className="flex h-screen w-screen overflow-hidden font-sans">
-      {/* ── LEFT HALF — white with customer equipment illustration ── */}
       <div className="hidden md:flex w-1/2 h-full bg-white flex-col">
-        {/* Logo */}
         <div className="flex items-center gap-2.5 px-10 pt-10 pb-0">
           <Link href="/" className="flex items-center gap-2.5">
             <div className="h-9 w-9 rounded-xl bg-[#0d4a2e] text-white flex items-center justify-center shadow">
@@ -119,7 +209,6 @@ function CustomerLoginForm() {
           </Link>
         </div>
 
-        {/* Illustration centered */}
         <div className="flex-1 flex items-center justify-center px-12">
           <div className="w-full max-w-md">
             <div className="relative">
@@ -139,7 +228,6 @@ function CustomerLoginForm() {
           </div>
         </div>
 
-        {/* Footer */}
         <div className="flex items-center justify-between px-10 pb-8 text-[11px] text-slate-400">
           <p>© 2026 Asset Rental · Customer Portal</p>
           <Link href="/admin/login" className="text-slate-400 hover:text-emerald-700 transition">
@@ -148,14 +236,11 @@ function CustomerLoginForm() {
         </div>
       </div>
 
-      {/* ── RIGHT HALF — dark green matching brand aesthetic ── */}
       <div className="w-full md:w-1/2 h-full bg-[#0d4a2e] flex flex-col justify-center px-8 sm:px-12 lg:px-20 relative overflow-y-auto">
-        {/* Subtle decorative circles */}
         <div className="absolute -top-20 -right-20 h-64 w-64 rounded-full bg-[#16a34a]/20 blur-3xl pointer-events-none" />
         <div className="absolute -bottom-16 -left-16 h-52 w-52 rounded-full bg-[#16a34a]/15 blur-3xl pointer-events-none" />
 
         <div className="relative z-10 w-full max-w-sm mx-auto py-8">
-          {/* Mobile logo */}
           <div className="flex items-center gap-2 mb-6 md:hidden">
             <div className="h-8 w-8 rounded-lg bg-white/10 flex items-center justify-center">
               <Boxes className="h-4 w-4 text-white" />
@@ -163,7 +248,6 @@ function CustomerLoginForm() {
             <span className="text-white font-bold text-base">Asset Rental</span>
           </div>
 
-          {/* Mode Switcher Tabs */}
           <div className="flex rounded-xl bg-black/20 p-1 mb-6 border border-white/10">
             <button
               type="button"
@@ -207,8 +291,54 @@ function CustomerLoginForm() {
             </div>
           )}
 
+          {verificationPending && (
+            <div className="mb-5 rounded-2xl border border-emerald-300/30 bg-emerald-500/10 p-4 text-white/90">
+              <div className="flex items-center gap-2 text-sm font-semibold text-emerald-200">
+                <ShieldCheck className="h-4 w-4" />
+                Email verification required
+              </div>
+              <p className="mt-2 text-xs text-emerald-50/80">
+                We sent a 6-digit code to <span className="font-semibold">{pendingEmail || regEmail}</span>.
+              </p>
+              <div className="mt-4 flex justify-center">
+                <InputOTP
+                  maxLength={6}
+                  value={otp}
+                  onChange={setOtp}
+                  containerClassName="gap-2"
+                >
+                  <InputOTPGroup>
+                    <InputOTPSlot index={0} className="h-11 w-11 rounded-lg border-white/20 bg-[#0b3d25] text-lg text-white" />
+                    <InputOTPSlot index={1} className="h-11 w-11 rounded-lg border-white/20 bg-[#0b3d25] text-lg text-white" />
+                    <InputOTPSlot index={2} className="h-11 w-11 rounded-lg border-white/20 bg-[#0b3d25] text-lg text-white" />
+                    <InputOTPSlot index={3} className="h-11 w-11 rounded-lg border-white/20 bg-[#0b3d25] text-lg text-white" />
+                    <InputOTPSlot index={4} className="h-11 w-11 rounded-lg border-white/20 bg-[#0b3d25] text-lg text-white" />
+                    <InputOTPSlot index={5} className="h-11 w-11 rounded-lg border-white/20 bg-[#0b3d25] text-lg text-white" />
+                  </InputOTPGroup>
+                </InputOTP>
+              </div>
+              <div className="mt-4 flex gap-2">
+                <button
+                  type="button"
+                  onClick={handleVerifyOtp}
+                  disabled={loading || otp.length !== 6}
+                  className="flex-1 rounded-xl bg-[#16a34a] px-3 py-2 text-xs font-semibold text-white disabled:opacity-50"
+                >
+                  Verify email
+                </button>
+                <button
+                  type="button"
+                  onClick={handleResendOtp}
+                  disabled={resendCooldown > 0 || loading}
+                  className="rounded-xl border border-white/20 bg-white/5 px-3 py-2 text-xs font-medium text-white disabled:opacity-50"
+                >
+                  {resendCooldown > 0 ? `Resend (${resendCooldown}s)` : 'Resend'}
+                </button>
+              </div>
+            </div>
+          )}
+
           {mode === 'login' ? (
-            /* ── SIGN IN FORM ── */
             <form onSubmit={handleLogin} className="space-y-4">
               <div>
                 <label className="block text-xs font-medium text-white/70 mb-1.5">
@@ -275,7 +405,6 @@ function CustomerLoginForm() {
               </button>
             </form>
           ) : (
-            /* ── REGISTER FORM ── */
             <form onSubmit={handleRegister} className="space-y-3.5">
               <div>
                 <label className="block text-xs font-medium text-white/70 mb-1">
@@ -378,7 +507,6 @@ function CustomerLoginForm() {
             </form>
           )}
 
-          {/* Back to browse */}
           <div className="mt-5 text-center">
             <Link
               href="/"

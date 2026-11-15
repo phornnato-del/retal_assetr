@@ -29,12 +29,20 @@ function payWayConfig() {
   if (!merchantId || !apiKey) {
     throw new Error('PayWay is not configured. Set PAYWAY_MERCHANT_ID and PAYWAY_API_KEY.')
   }
+  if (/^https?:\/\//i.test(apiKey)) {
+    throw new Error('PAYWAY_API_KEY must be the API key issued by ABA, not a URL. Set the endpoint host with PAYWAY_BASE_URL.')
+  }
 
   return {
     merchantId,
     apiKey,
     baseUrl: (process.env.PAYWAY_BASE_URL || DEFAULT_PAYWAY_BASE_URL).replace(/\/$/, ''),
   }
+}
+
+export function getPayWayCacheContext() {
+  const { baseUrl, merchantId } = payWayConfig()
+  return JSON.stringify([baseUrl, merchantId])
 }
 
 function requestTime() {
@@ -53,9 +61,22 @@ async function postPayWay<T>(url: string, payload: Record<string, unknown>): Pro
     cache: 'no-store',
   })
 
-  const result = await response.json().catch(() => null)
-  if (!response.ok || !result) {
-    throw new Error(`PayWay request failed with HTTP ${response.status}.`)
+  const result = await response.json().catch(() => null) as {
+    status?: PayWayStatus
+    message?: string
+    error?: string
+  } | null
+
+  if (!response.ok) {
+    const details = [
+      result?.status?.code ? `code ${result.status.code}` : '',
+      result?.status?.message || result?.message || result?.error || '',
+      result?.status?.trace_id ? `trace ${result.status.trace_id}` : '',
+    ].filter(Boolean).join('; ')
+    throw new Error(`PayWay request failed with HTTP ${response.status}${details ? `: ${details}` : '.'}`)
+  }
+  if (!result) {
+    throw new Error(`PayWay returned an invalid response with HTTP ${response.status}.`)
   }
 
   return result as T
@@ -75,7 +96,7 @@ export async function createPayWayQr(input: {
 }) {
   const { merchantId, apiKey, baseUrl } = payWayConfig()
   const reqTime = requestTime()
-  const amount = input.amount.toFixed(2)
+  const amount = Number(input.amount.toFixed(2))
   const items = Buffer.from(JSON.stringify([
     { name: input.itemName, quantity: input.quantity, price: input.amount },
   ])).toString('base64')
@@ -92,7 +113,7 @@ export async function createPayWayQr(input: {
     reqTime,
     merchantId,
     input.tranId,
-    amount,
+    String(amount),
     items,
     input.firstName,
     input.lastName,
@@ -130,11 +151,11 @@ export async function createPayWayQr(input: {
     payment_option: paymentOption,
     items,
     currency,
-    callback_url: callbackUrl || null,
-    return_deeplink: null,
-    custom_fields: null,
-    return_params: null,
-    payout: null,
+    callback_url: callbackUrl,
+    return_deeplink: '',
+    custom_fields: '',
+    return_params: '',
+    payout: '',
     lifetime: input.lifetime,
     qr_image_template: qrImageTemplate,
     hash,

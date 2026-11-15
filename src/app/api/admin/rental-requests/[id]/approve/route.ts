@@ -181,7 +181,7 @@ export async function POST(
         heldUnitsCount: selectedUnits.length,
         expiresAt,
       }
-    })
+    }, { timeout: 15_000 })
 
     return NextResponse.json({
       success: true,

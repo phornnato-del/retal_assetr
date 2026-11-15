@@ -3,13 +3,14 @@ import { db } from '@/lib/db'
 import { getCurrentUser } from '@/lib/auth'
 import { finalizeBookingReservation } from '@/lib/reservations'
 import { randomBytes } from 'node:crypto'
-import { createPayWayQr } from '@/lib/payway'
+import { createPayWayQr, getPayWayCacheContext } from '@/lib/payway'
 
 async function startPayWayQr(
   requestId: string,
   user: NonNullable<Awaited<ReturnType<typeof getCurrentUser>>>,
   idempotencyKey?: string
 ) {
+  const payWayCacheContext = getPayWayCacheContext()
   const prepared = await db.$transaction(async (tx) => {
     const request = await tx.rentalRequest.findFirst({
       where: { OR: [{ id: requestId }, { requestNo: requestId }], renterId: user.id },
@@ -35,14 +36,23 @@ async function startPayWayQr(
     const existing = request.paymentOrder?.attempts.find((attempt) => {
       if (attempt.provider !== 'ABA_PAYWAY' || attempt.status !== 'PROCESSING' || !attempt.providerData) return false
       try {
-        const savedQr = JSON.parse(attempt.providerData) as { expires_at?: string }
-        return Boolean(savedQr.expires_at && new Date(savedQr.expires_at).getTime() > Date.now())
+        const savedQr = JSON.parse(attempt.providerData) as {
+          expires_at?: string
+          _payway_context?: string
+        }
+        return Boolean(
+          savedQr._payway_context === payWayCacheContext &&
+          savedQr.expires_at &&
+          new Date(savedQr.expires_at).getTime() > Date.now()
+        )
       } catch {
         return false
       }
     })
     if (existing?.providerData) {
-      return { cached: JSON.parse(existing.providerData) as Record<string, unknown> }
+      const cached = JSON.parse(existing.providerData) as Record<string, unknown>
+      delete cached._payway_context
+      return { cached }
     }
 
     const quote = request.quoteSnapshot
@@ -101,7 +111,7 @@ async function startPayWayQr(
       phone: user.phone || '',
       lifetime: Math.max(3, Math.min(remainingMinutes, 120 * 24 * 60)),
     }
-  })
+  }, { timeout: 15_000 })
 
   if ('cached' in prepared) {
     return NextResponse.json({ success: true, status: 'PENDING', payment_method: 'KHQR', ...prepared.cached })
@@ -121,7 +131,10 @@ async function startPayWayQr(
 
     await db.rentalPaymentAttempt.update({
       where: { id: prepared.attemptId },
-      data: { providerReference: qr.tranId, providerData: JSON.stringify(responseData) },
+      data: {
+        providerReference: qr.tranId,
+        providerData: JSON.stringify({ ...responseData, _payway_context: payWayCacheContext }),
+      },
     })
 
     return NextResponse.json({

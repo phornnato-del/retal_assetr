@@ -3,65 +3,61 @@
 import { useState, useEffect } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import Link from 'next/link'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useMutation } from '@tanstack/react-query'
 import {
-  CreditCard,
   QrCode,
+  Banknote,
   Building2,
   Shield,
   Clock,
   Calendar,
   Truck,
-  ArrowRight,
   AlertTriangle,
   AlertCircle,
-  CheckCircle2,
-  Lock,
   Loader2,
-  Copy,
-  Check,
   ArrowLeft,
   DollarSign,
   FileText,
-  Banknote,
 } from 'lucide-react'
 import { Header } from '@/components/rental/Header'
 import { Footer } from '@/components/rental/Footer'
 import { Button } from '@/components/ui/button'
-import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { Label } from '@/components/ui/label'
 import { toast } from 'sonner'
 
+type PaymentMethod = 'KHQR' | 'BANK_TRANSFER' | 'CASH'
+
 export default function RentalPaymentCheckoutPage() {
   const { id } = useParams<{ id: string }>()
   const router = useRouter()
-  const queryClient = useQueryClient()
 
-  const [paymentMethod, setPaymentMethod] = useState<'CARD' | 'KHQR' | 'BANK_TRANSFER' | 'CASH'>('CARD')
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('KHQR')
   const [bankRef, setBankRef] = useState('')
   const [cashNote, setCashNote] = useState('')
+  const [clockNow, setClockNow] = useState(() => Date.now())
   const [idempotencyKey] = useState(
     () => `PAY-IDEM-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`
   )
-  const [copiedBank, setCopiedBank] = useState(false)
   const [paywayQr, setPaywayQr] = useState<{
     tran_id: string
     qr_image: string
     qr_string: string
     abapay_deeplink: string | null
+    expires_at: string
   } | null>(null)
-
-  // Card form state
-  const [cardNumber, setCardNumber] = useState('4242 •••• •••• 4242')
-  const [cardExpiry, setCardExpiry] = useState('12/28')
-  const [cardCvc, setCardCvc] = useState('•••')
-  const [cardName, setCardName] = useState('Sophea Chan')
+  const qrExpiryTime = paywayQr ? Date.parse(paywayQr.expires_at) : null
+  const qrSecondsRemaining =
+    qrExpiryTime === null
+      ? null
+      : Number.isFinite(qrExpiryTime)
+        ? Math.max(0, Math.ceil((qrExpiryTime - clockNow) / 1000))
+        : 0
 
   // Fetch Payment Summary
-  const { data, isLoading, error, refetch } = useQuery({
+  const { data, isLoading, error } = useQuery({
     queryKey: ['payment-summary', id],
     queryFn: async () => {
       const res = await fetch(`/api/me/rental-requests/${id}/payment-summary`)
@@ -76,14 +72,14 @@ export default function RentalPaymentCheckoutPage() {
 
   const paywayStatusQuery = useQuery({
     queryKey: ['payway-payment-status', id, paywayQr?.tran_id],
-    enabled: Boolean(paywayQr),
+    enabled: Boolean(paywayQr) && qrSecondsRemaining !== 0,
     queryFn: async () => {
       const res = await fetch(`/api/me/rental-requests/${id}/payment-status`, { cache: 'no-store' })
       const status = await res.json()
       if (!res.ok) throw new Error(status.error || 'Unable to verify PayWay payment')
       return status
     },
-    refetchInterval: paywayQr ? 5000 : false,
+    refetchInterval: paywayQr && qrSecondsRemaining !== 0 ? 5000 : false,
   })
 
   useEffect(() => {
@@ -92,6 +88,12 @@ export default function RentalPaymentCheckoutPage() {
       router.push(`/rentals/requests/${id}/receipt`)
     }
   }, [id, paywayStatusQuery.data?.payment_status, router])
+
+  useEffect(() => {
+    if (!paywayQr?.expires_at) return
+    const intervalId = window.setInterval(() => setClockNow(Date.now()), 1000)
+    return () => window.clearInterval(intervalId)
+  }, [paywayQr?.expires_at])
 
   // Payment Attempt Mutation
   const paymentMutation = useMutation({
@@ -114,26 +116,37 @@ export default function RentalPaymentCheckoutPage() {
       if (!res.ok) {
         throw new Error(resData.error || 'Payment failed')
       }
+      if (paymentMethod === 'KHQR' &&
+        (resData.payment_method !== 'KHQR' ||
+          resData.status !== 'PENDING' ||
+          !resData.qr_image ||
+          !Number.isFinite(Date.parse(resData.expires_at)))) {
+        throw new Error('ABA PayWay did not return a payment QR.')
+      }
       return resData
     },
     onSuccess: (resData) => {
-      if (resData.payment_method === 'KHQR' && resData.status === 'PENDING') {
+      if (resData.payment_method === 'KHQR') {
+        setClockNow(Date.now())
         setPaywayQr({
           tran_id: resData.tran_id,
           qr_image: resData.qr_image,
           qr_string: resData.qr_string,
           abapay_deeplink: resData.abapay_deeplink,
+          expires_at: resData.expires_at,
         })
-        toast.success('PayWay QR created. Scan it to complete payment.')
+        toast.success('ABA PayWay QR created. Scan it to complete payment.')
+      } else if (resData.payment_method === 'CASH') {
+        toast.success('Cash payment registered. Pay at the counter when you pick up the equipment.')
+        router.push('/rentals/my-requests')
+      } else if (resData.payment_method === 'BANK_TRANSFER') {
+        toast.success('Bank transfer submitted for manual verification.')
+        router.push('/rentals/my-requests')
       } else if (resData.status === 'PAID') {
         toast.success('Payment captured! Rental confirmed.')
         router.push(`/rentals/requests/${id}/receipt`)
-      } else if (resData.payment_method === 'CASH' || paymentMethod === 'CASH') {
-        toast.success('Cash payment registered! Your equipment hold is preserved.')
-        router.push('/rentals/my-requests')
       } else {
-        toast.success('Bank transfer proof submitted for review.')
-        router.push('/rentals/my-requests')
+        toast.error('The payment response was not recognized. Please contact support.')
       }
     },
     onError: (err: any) => {
@@ -312,285 +325,200 @@ export default function RentalPaymentCheckoutPage() {
               </CardContent>
             </Card>
 
-            {/* 2. Payment Method Selector */}
+            {/* 2. Payment Options */}
             <Card className="shadow-sm border-border">
               <CardHeader className="pb-3 border-b border-border/60">
-                <CardTitle className="text-sm font-bold flex items-center gap-2">
-                  <CreditCard className="h-4 w-4 text-emerald-600" />
-                  Select Payment Method
-                </CardTitle>
+                <CardTitle className="text-sm font-bold">Choose how to pay</CardTitle>
+                <CardDescription className="text-xs">
+                  Select a payment method for ${breakdown.total_due.toFixed(2)} {breakdown.currency}.
+                </CardDescription>
               </CardHeader>
               <CardContent className="pt-4 space-y-4">
                 <RadioGroup
                   value={paymentMethod}
-                  onValueChange={(val: any) => setPaymentMethod(val)}
-                  className="space-y-3"
+                  disabled={
+                    Boolean(paywayQr) &&
+                    qrSecondsRemaining !== 0 &&
+                    !['FAILED', 'DECLINED', 'CANCELLED'].includes(paywayStatusQuery.data?.payment_status)
+                  }
+                  onValueChange={(value) => {
+                    if (value === 'KHQR' || value === 'BANK_TRANSFER' || value === 'CASH') {
+                      setPaymentMethod(value)
+                    }
+                  }}
+                  className="space-y-2"
                 >
-                  {/* Card Option */}
-                  <div
-                    onClick={() => setPaymentMethod('CARD')}
-                    className={`p-3.5 rounded-xl border cursor-pointer transition flex items-start gap-3 ${
-                      paymentMethod === 'CARD'
-                        ? 'border-emerald-600 bg-emerald-50/20 dark:bg-emerald-950/20'
-                        : 'border-border hover:bg-muted/30'
-                    }`}
-                  >
-                    <RadioGroupItem value="CARD" id="pay-card" className="mt-0.5 text-emerald-600" />
-                    <div className="flex-1 text-xs">
-                      <Label htmlFor="pay-card" className="font-bold text-foreground cursor-pointer flex items-center justify-between">
-                        <span>Credit / Debit Card (Instant)</span>
-                        <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
-                          <span className="bg-muted px-1.5 py-0.5 rounded font-mono">VISA</span>
-                          <span className="bg-muted px-1.5 py-0.5 rounded font-mono">MC</span>
-                        </div>
-                      </Label>
-                      <p className="text-muted-foreground mt-0.5">
-                        Instant capture & automated digital receipt generation.
-                      </p>
-
-                      {paymentMethod === 'CARD' && (
-                        <div className="mt-3 pt-3 border-t border-border space-y-3">
-                          <div>
-                            <label className="text-[11px] font-semibold text-foreground block mb-1">
-                              Cardholder Name
-                            </label>
-                            <Input
-                              value={cardName}
-                              onChange={(e) => setCardName(e.target.value)}
-                              className="text-xs h-8"
-                            />
-                          </div>
-                          <div>
-                            <label className="text-[11px] font-semibold text-foreground block mb-1">
-                              Card Number
-                            </label>
-                            <Input
-                              value={cardNumber}
-                              onChange={(e) => setCardNumber(e.target.value)}
-                              className="text-xs h-8 font-mono"
-                            />
-                          </div>
-                          <div className="grid grid-cols-2 gap-2">
-                            <div>
-                              <label className="text-[11px] font-semibold text-foreground block mb-1">
-                                Expiration
-                              </label>
-                              <Input
-                                value={cardExpiry}
-                                onChange={(e) => setCardExpiry(e.target.value)}
-                                className="text-xs h-8 font-mono"
-                              />
-                            </div>
-                            <div>
-                              <label className="text-[11px] font-semibold text-foreground block mb-1">
-                                CVC / CVV
-                              </label>
-                              <Input
-                                value={cardCvc}
-                                onChange={(e) => setCardCvc(e.target.value)}
-                                className="text-xs h-8 font-mono"
-                              />
-                            </div>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* KHQR Option */}
-                  <div
-                    onClick={() => setPaymentMethod('KHQR')}
-                    className={`p-3.5 rounded-xl border cursor-pointer transition flex items-start gap-3 ${
+                  <Label
+                    htmlFor="pay-khqr"
+                    className={`flex cursor-pointer items-start gap-3 rounded-xl border p-3.5 transition ${
                       paymentMethod === 'KHQR'
-                        ? 'border-emerald-600 bg-emerald-50/20 dark:bg-emerald-950/20'
+                        ? 'border-emerald-600 bg-emerald-50/40 dark:bg-emerald-950/20'
                         : 'border-border hover:bg-muted/30'
                     }`}
                   >
-                    <RadioGroupItem value="KHQR" id="pay-khqr" className="mt-0.5 text-emerald-600" />
-                    <div className="flex-1 text-xs">
-                      <Label htmlFor="pay-khqr" className="font-bold text-foreground cursor-pointer flex items-center justify-between">
-                        <span>Bakong KHQR / ABA PAY</span>
-                        <Badge variant="outline" className="text-[9px] bg-red-50 text-red-700 border-red-200">
-                          KHQR
-                        </Badge>
-                      </Label>
-                      <p className="text-muted-foreground mt-0.5">
-                        Scan QR code with ABA Mobile, Bakong, or any Cambodian banking app.
-                      </p>
+                    <RadioGroupItem value="KHQR" id="pay-khqr" className="mt-0.5" />
+                    <span className="flex-1">
+                      <span className="flex items-center gap-2 text-xs font-bold">
+                        <QrCode className="h-4 w-4 text-emerald-600" />
+                        ABA KHQR / ABA PAY
+                      </span>
+                      <span className="mt-1 block text-xs font-normal text-muted-foreground">
+                        Scan the PayWay QR using ABA Mobile or another supported KHQR app.
+                      </span>
+                    </span>
+                  </Label>
 
-                      {paymentMethod === 'KHQR' && (
-                        <div className="mt-3 pt-3 border-t border-border flex flex-col items-center p-3 bg-white dark:bg-slate-900 rounded-lg">
-                          <div className="w-52 h-52 bg-white rounded-lg border flex items-center justify-center p-2 mb-2">
-                            {paywayQr ? (
-                              <img src={paywayQr.qr_image} alt="PayWay KHQR payment code" className="h-full w-full object-contain" />
-                            ) : (
-                              <QrCode className="w-28 h-28 text-slate-300" />
-                            )}
-                          </div>
-                          <span className="font-mono font-bold text-xs text-foreground">
-                            {paywayQr ? 'Scan this PayWay QR to pay' : `Pay $${breakdown.total_due.toFixed(2)}`}
-                          </span>
-                          <span className="text-[10px] text-muted-foreground mt-0.5">
-                            {paywayQr ? `Transaction ${paywayQr.tran_id}` : 'ABA PAY or another KHQR banking app'}
-                          </span>
-                          {paywayQr?.abapay_deeplink && (
-                            <a href={paywayQr.abapay_deeplink} className="mt-2 text-xs font-semibold text-emerald-700 underline">
-                              Open ABA Mobile
-                            </a>
-                          )}
-                          {paywayQr && (
-                            <div className="mt-3 flex items-center gap-2 text-[11px] text-muted-foreground" aria-live="polite">
-                              {paywayStatusQuery.data?.payment_status === 'REQUIRES_REVIEW' ? (
-                                <span>Payment received; support is reviewing the transaction.</span>
-                              ) : paywayStatusQuery.data?.payment_status === 'FAILED' ||
-                                paywayStatusQuery.data?.payment_status === 'DECLINED' ||
-                                paywayStatusQuery.data?.payment_status === 'CANCELLED' ? (
-                                <span className="text-destructive">This QR was not paid. Generate a new QR to try again.</span>
-                              ) : (
-                                <>
-                                  <Loader2 className="h-3.5 w-3.5 animate-spin text-emerald-600" />
-                                  Waiting for PayWay to confirm payment…
-                                </>
-                              )}
-                            </div>
-                          )}
-                          {paywayQr && ['FAILED', 'DECLINED', 'CANCELLED'].includes(paywayStatusQuery.data?.payment_status) && (
-                            <Button
-                              type="button"
-                              variant="outline"
-                              size="sm"
-                              className="mt-2"
-                              onClick={() => setPaywayQr(null)}
-                            >
-                              Generate a new QR
-                            </Button>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Bank Wire Option */}
-                  <div
-                    onClick={() => setPaymentMethod('BANK_TRANSFER')}
-                    className={`p-3.5 rounded-xl border cursor-pointer transition flex items-start gap-3 ${
+                  <Label
+                    htmlFor="pay-bank"
+                    className={`flex cursor-pointer items-start gap-3 rounded-xl border p-3.5 transition ${
                       paymentMethod === 'BANK_TRANSFER'
-                        ? 'border-emerald-600 bg-emerald-50/20 dark:bg-emerald-950/20'
+                        ? 'border-emerald-600 bg-emerald-50/40 dark:bg-emerald-950/20'
                         : 'border-border hover:bg-muted/30'
                     }`}
                   >
-                    <RadioGroupItem value="BANK_TRANSFER" id="pay-bank" className="mt-0.5 text-emerald-600" />
-                    <div className="flex-1 text-xs">
-                      <Label htmlFor="pay-bank" className="font-bold text-foreground cursor-pointer">
-                        Direct Bank Wire Transfer (Manual Verification)
-                      </Label>
-                      <p className="text-muted-foreground mt-0.5">
-                        Transfer to our corporate account and provide the reference number.
-                      </p>
+                    <RadioGroupItem value="BANK_TRANSFER" id="pay-bank" className="mt-0.5" />
+                    <span className="flex-1">
+                      <span className="flex items-center gap-2 text-xs font-bold">
+                        <Building2 className="h-4 w-4 text-emerald-600" />
+                        Bank transfer
+                      </span>
+                      <span className="mt-1 block text-xs font-normal text-muted-foreground">
+                        Submit your transfer reference for manual verification.
+                      </span>
+                    </span>
+                  </Label>
 
-                      {paymentMethod === 'BANK_TRANSFER' && (
-                        <div className="mt-3 pt-3 border-t border-border space-y-3">
-                          <div className="p-2.5 rounded bg-muted/50 border text-[11px] space-y-1">
-                            <p className="font-semibold text-foreground">ABA Bank (USD):</p>
-                            <div className="flex items-center justify-between font-mono">
-                              <span>001 888 999 001 (RentHub Ltd)</span>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  navigator.clipboard.writeText('001888999001')
-                                  setCopiedBank(true)
-                                  setTimeout(() => setCopiedBank(false), 2000)
-                                }}
-                                className="text-emerald-600 hover:underline flex items-center gap-1"
-                              >
-                                {copiedBank ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
-                                Copy
-                              </button>
-                            </div>
-                          </div>
-
-                          <div>
-                            <label className="text-[11px] font-semibold text-foreground block mb-1">
-                              Bank Transaction / Reference ID <span className="text-destructive">*</span>
-                            </label>
-                            <Input
-                              required
-                              value={bankRef}
-                              onChange={(e) => setBankRef(e.target.value)}
-                              placeholder="e.g. ABA-TXN-12345678"
-                              className="text-xs h-8 font-mono"
-                            />
-                            <p className="text-[10px] text-muted-foreground mt-1">
-                              Our finance team reconciles the bank feed and verifies within 15 minutes.
-                            </p>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Cash on Pickup Option */}
-                  <div
-                    onClick={() => setPaymentMethod('CASH')}
-                    className={`p-3.5 rounded-xl border cursor-pointer transition flex items-start gap-3 ${
+                  <Label
+                    htmlFor="pay-cash"
+                    className={`flex cursor-pointer items-start gap-3 rounded-xl border p-3.5 transition ${
                       paymentMethod === 'CASH'
-                        ? 'border-emerald-600 bg-emerald-50/20 dark:bg-emerald-950/20'
+                        ? 'border-emerald-600 bg-emerald-50/40 dark:bg-emerald-950/20'
                         : 'border-border hover:bg-muted/30'
                     }`}
                   >
-                    <RadioGroupItem value="CASH" id="pay-cash" className="mt-0.5 text-emerald-600" />
-                    <div className="flex-1 text-xs">
-                      <Label htmlFor="pay-cash" className="font-bold text-foreground cursor-pointer flex items-center justify-between">
-                        <span className="flex items-center gap-1.5">
-                          <Banknote className="h-4 w-4 text-emerald-600" />
-                          Pay by Cash (At Counter / On Pickup)
-                        </span>
-                        <Badge variant="outline" className="text-[9px] bg-emerald-50 text-emerald-700 border-emerald-200">
-                          Cash at Counter
-                        </Badge>
-                      </Label>
-                      <p className="text-muted-foreground mt-0.5">
-                        Pay in cash upon equipment pickup at the logistics warehouse or service desk.
-                      </p>
-
-                      {paymentMethod === 'CASH' && (
-                        <div className="mt-3 pt-3 border-t border-border space-y-3">
-                          <div className="p-2.5 rounded bg-emerald-50/60 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 text-[11px] space-y-1.5">
-                            <div className="flex justify-between items-center text-foreground font-semibold">
-                              <span>Rental Charges & Fees:</span>
-                              <span>${breakdown.rental_charges.subtotal_due.toFixed(2)}</span>
-                            </div>
-                            <div className="flex justify-between items-center text-emerald-700 dark:text-emerald-300 font-semibold">
-                              <span>Refundable Security Deposit (Cash Escrow):</span>
-                              <span>${breakdown.refundable_deposit.amount.toFixed(2)}</span>
-                            </div>
-                            <div className="border-t border-emerald-200 dark:border-emerald-800 pt-1 flex justify-between items-center font-bold text-xs text-foreground">
-                              <span>Total Cash to Prepare:</span>
-                              <span className="text-emerald-600 text-sm font-extrabold">${breakdown.total_due.toFixed(2)} USD</span>
-                            </div>
-                            <p className="text-[10px] text-muted-foreground pt-1 border-t border-dashed border-emerald-200 dark:border-emerald-800">
-                              * A physical official receipt and deposit voucher will be signed and provided by the counter staff when cash is received.
-                            </p>
-                          </div>
-
-                          <div>
-                            <label className="text-[11px] font-semibold text-foreground block mb-1">
-                              Pickup / Cash Notes (Optional)
-                            </label>
-                            <Input
-                              value={cashNote}
-                              onChange={(e) => setCashNote(e.target.value)}
-                              placeholder="e.g. Will bring exact cash to Central Logistics Hub at 10:00 AM"
-                              className="text-xs h-8"
-                            />
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  </div>
+                    <RadioGroupItem value="CASH" id="pay-cash" className="mt-0.5" />
+                    <span className="flex-1">
+                      <span className="flex items-center gap-2 text-xs font-bold">
+                        <Banknote className="h-4 w-4 text-emerald-600" />
+                        Cash on pickup
+                      </span>
+                      <span className="mt-1 block text-xs font-normal text-muted-foreground">
+                        Pay at the counter when you collect the equipment.
+                      </span>
+                    </span>
+                  </Label>
                 </RadioGroup>
 
-                {/* Submit Action */}
+                {paymentMethod === 'KHQR' && (
+                  <div className="rounded-xl border bg-muted/20 p-4">
+                    {paywayQr ? (
+                      <div className="flex flex-col items-center text-center">
+                        <img
+                          src={paywayQr.qr_image}
+                          alt="ABA PayWay KHQR payment code"
+                          className="h-56 w-56 rounded-lg border bg-white object-contain p-2"
+                        />
+                        <p className="mt-3 text-sm font-bold">Scan to pay ${breakdown.total_due.toFixed(2)}</p>
+                        <p className="mt-1 text-[11px] text-muted-foreground">
+                          Transaction {paywayQr.tran_id}
+                        </p>
+                        {qrSecondsRemaining !== null && (
+                          <p
+                            className={`mt-2 text-xs font-semibold ${
+                              qrSecondsRemaining === 0 ? 'text-destructive' : 'text-amber-700'
+                            }`}
+                            aria-live="polite"
+                          >
+                            {qrSecondsRemaining === 0
+                              ? 'This QR has expired.'
+                              : `QR expires in ${Math.floor(qrSecondsRemaining / 60)
+                                  .toString()
+                                  .padStart(2, '0')}:${(qrSecondsRemaining % 60).toString().padStart(2, '0')}`}
+                          </p>
+                        )}
+                        {paywayQr.abapay_deeplink && (
+                          <a
+                            href={paywayQr.abapay_deeplink}
+                            className="mt-2 text-xs font-semibold text-emerald-700 underline"
+                          >
+                            Open ABA Mobile
+                          </a>
+                        )}
+                        {qrSecondsRemaining !== 0 &&
+                          (paywayStatusQuery.data?.payment_status === 'REQUIRES_REVIEW' ? (
+                            <p className="mt-3 text-xs text-muted-foreground">
+                              Payment received; support is reviewing the transaction.
+                            </p>
+                          ) : ['FAILED', 'DECLINED', 'CANCELLED'].includes(paywayStatusQuery.data?.payment_status) ? (
+                            <p className="mt-3 text-xs text-destructive">
+                              This QR was not paid. Generate a new one to try again.
+                            </p>
+                          ) : (
+                            <p className="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
+                              <Loader2 className="h-3.5 w-3.5 animate-spin text-emerald-600" />
+                              Waiting for PayWay to confirm payment…
+                            </p>
+                          ))}
+                        {(qrSecondsRemaining === 0 ||
+                          ['FAILED', 'DECLINED', 'CANCELLED'].includes(paywayStatusQuery.data?.payment_status)) && (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="mt-3"
+                            onClick={() => setPaywayQr(null)}
+                          >
+                            Create a new payment QR
+                          </Button>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="py-5 text-center">
+                        <p className="text-sm font-semibold">Your QR will appear here</p>
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          Select Payment below to create a secure, time-limited PayWay QR.
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {paymentMethod === 'BANK_TRANSFER' && (
+                  <div className="space-y-2 rounded-xl border bg-muted/20 p-4">
+                    <p className="text-xs text-muted-foreground">
+                      Use the verified bank account details provided by the rental company, then enter your transaction reference.
+                    </p>
+                    <Label htmlFor="bank-reference" className="text-xs font-semibold">
+                      Transfer reference
+                    </Label>
+                    <Input
+                      id="bank-reference"
+                      value={bankRef}
+                      onChange={(event) => setBankRef(event.target.value)}
+                      placeholder="Enter your bank transaction reference"
+                      className="text-sm"
+                    />
+                  </div>
+                )}
+
+                {paymentMethod === 'CASH' && (
+                  <div className="space-y-2 rounded-xl border bg-muted/20 p-4">
+                    <p className="text-xs text-muted-foreground">
+                      Pay ${breakdown.total_due.toFixed(2)} {breakdown.currency} at the service counter during pickup.
+                    </p>
+                    <Label htmlFor="cash-note" className="text-xs font-semibold">
+                      Note <span className="font-normal text-muted-foreground">(optional)</span>
+                    </Label>
+                    <Input
+                      id="cash-note"
+                      value={cashNote}
+                      onChange={(event) => setCashNote(event.target.value)}
+                      placeholder="Add a note for the counter staff"
+                      className="text-sm"
+                    />
+                  </div>
+                )}
+
                 <Button
                   onClick={() => paymentMutation.mutate()}
                   disabled={
@@ -599,34 +527,26 @@ export default function RentalPaymentCheckoutPage() {
                     (paymentMethod === 'KHQR' && Boolean(paywayQr)) ||
                     (paymentMethod === 'BANK_TRANSFER' && !bankRef.trim())
                   }
-                  className="w-full h-12 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-base shadow-sm gap-2 transition-all mt-4"
+                  className="w-full h-12 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-base shadow-sm gap-2 transition-all"
                 >
                   {paymentMutation.isPending ? (
                     <>
                       <Loader2 className="h-5 w-5 animate-spin" />
-                      Processing Request...
-                    </>
-                  ) : paymentMethod === 'CASH' ? (
-                    <>
-                      <Banknote className="h-4 w-4" />
-                      Confirm Cash on Pickup (${breakdown.total_due.toFixed(2)})
+                      Processing...
                     </>
                   ) : paymentMethod === 'KHQR' && paywayQr ? (
                     <>
                       <Clock className="h-4 w-4" />
-                      Waiting for PayWay Confirmation
+                      Waiting for payment
                     </>
                   ) : (
-                    <>
-                      <Lock className="h-4 w-4" />
-                      Authorize & Pay ${breakdown.total_due.toFixed(2)}
-                    </>
+                    'Payment'
                   )}
                 </Button>
 
                 <p className="text-center text-[11px] text-muted-foreground flex items-center justify-center gap-1">
                   <Shield className="h-3.5 w-3.5 text-emerald-600" />
-                  Encrypted 256-bit TLS connection. Idempotent payment tokenization.
+                  Your payment details are sent securely over HTTPS.
                 </p>
               </CardContent>
             </Card>

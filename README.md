@@ -68,3 +68,16 @@ Example terminal output:
 - They must verify the code before they can log in.
 - The OTP expires after 5 minutes.
 - The verification step is enforced by the backend routes in `src/app/api/auth/login/route.ts` and `src/app/api/auth/verify-otp/route.ts`.
+
+## ABA PayWay sandbox KHQR
+
+The rental checkout can create an ABA PayWay KHQR payment and verifies the transaction with PayWay before confirming the rental. Add these values to `.env` using the sandbox credentials from your PayWay sandbox account:
+
+```env
+PAYWAY_BASE_URL="https://checkout-sandbox.payway.com.kh"
+PAYWAY_MERCHANT_ID="your_sandbox_merchant_id"
+PAYWAY_API_KEY="your_sandbox_api_key"
+PAYWAY_CALLBACK_URL="https://your-public-domain/api/payment-providers/payway/webhook"
+```
+
+Keep `PAYWAY_API_KEY` server-side; never expose it with a `NEXT_PUBLIC_` prefix. For local testing, PayWay cannot call a localhost callback URL, but the checkout also checks transaction status from the server. For deployment, configure a public HTTPS callback URL and whitelist its domain in the PayWay merchant profile. Use the production base URL and production credentials only after sandbox testing is complete.

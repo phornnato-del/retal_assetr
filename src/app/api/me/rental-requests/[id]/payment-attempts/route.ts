@@ -2,6 +2,148 @@ import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { getCurrentUser } from '@/lib/auth'
 import { finalizeBookingReservation } from '@/lib/reservations'
+import { randomBytes } from 'node:crypto'
+import { createPayWayQr } from '@/lib/payway'
+
+async function startPayWayQr(
+  requestId: string,
+  user: NonNullable<Awaited<ReturnType<typeof getCurrentUser>>>,
+  idempotencyKey?: string
+) {
+  const prepared = await db.$transaction(async (tx) => {
+    const request = await tx.rentalRequest.findFirst({
+      where: { OR: [{ id: requestId }, { requestNo: requestId }], renterId: user.id },
+      include: {
+        quoteSnapshot: true,
+        inventoryHold: true,
+        listing: true,
+        paymentOrder: { include: { attempts: true } },
+      },
+    })
+
+    if (!request) throw new Error('NOT_FOUND: Rental request not found')
+    if (request.status !== 'APPROVED_AWAITING_PAYMENT' && request.status !== 'PAYMENT_PENDING_VERIFICATION') {
+      throw new Error(`CONFLICT: Request is currently in "${request.status}". Payment can only be initialized on approved requests.`)
+    }
+
+    const hold = request.inventoryHold
+    if (!hold || hold.status !== 'ACTIVE' || new Date(hold.expiresAt) <= new Date()) {
+      throw new Error('HOLD_EXPIRED: The inventory hold deadline for this approval has elapsed.')
+    }
+    if (!request.quoteSnapshot) throw new Error('Commercial quote snapshot missing')
+
+    const existing = request.paymentOrder?.attempts.find((attempt) => {
+      if (attempt.provider !== 'ABA_PAYWAY' || attempt.status !== 'PROCESSING' || !attempt.providerData) return false
+      try {
+        const savedQr = JSON.parse(attempt.providerData) as { expires_at?: string }
+        return Boolean(savedQr.expires_at && new Date(savedQr.expires_at).getTime() > Date.now())
+      } catch {
+        return false
+      }
+    })
+    if (existing?.providerData) {
+      return { cached: JSON.parse(existing.providerData) as Record<string, unknown> }
+    }
+
+    const quote = request.quoteSnapshot
+    const paymentOrder = await tx.rentalPaymentOrder.upsert({
+      where: { requestId: request.id },
+      update: {
+        currency: quote.currency,
+        rentalAmount: quote.rentalSubtotal + quote.deliveryFee + quote.estimatedTax,
+        depositAmount: quote.securityDeposit,
+        deliveryFee: quote.deliveryFee,
+        tax: quote.estimatedTax,
+        totalDue: quote.totalPayable,
+        dueAt: hold.expiresAt,
+        paymentStatus: 'PROCESSING',
+      },
+      create: {
+        requestId: request.id,
+        currency: quote.currency,
+        rentalAmount: quote.rentalSubtotal + quote.deliveryFee + quote.estimatedTax,
+        depositAmount: quote.securityDeposit,
+        deliveryFee: quote.deliveryFee,
+        tax: quote.estimatedTax,
+        totalDue: quote.totalPayable,
+        dueAt: hold.expiresAt,
+        paymentStatus: 'PROCESSING',
+      },
+    })
+    const attemptNo = (request.paymentOrder?.attempts.reduce((max, attempt) => Math.max(max, attempt.attemptNo), 0) || 0) + 1
+    const attempt = await tx.rentalPaymentAttempt.create({
+      data: {
+        paymentOrderId: paymentOrder.id,
+        method: 'KHQR',
+        provider: 'ABA_PAYWAY',
+        amount: quote.totalPayable,
+        currency: quote.currency,
+        idempotencyKey: idempotencyKey || null,
+        attemptNo,
+        status: 'PROCESSING',
+      },
+    })
+
+    const remainingMinutes = Math.floor((new Date(hold.expiresAt).getTime() - Date.now()) / 60000)
+    const tranId = `PAY${Date.now().toString(36).toUpperCase()}${randomBytes(4).toString('hex').toUpperCase()}`
+
+    return {
+      attemptId: attempt.id,
+      paymentOrderId: paymentOrder.id,
+      tranId,
+      amount: quote.totalPayable,
+      currency: quote.currency,
+      itemName: request.listing.name,
+      quantity: request.quantity,
+      firstName: user.name.replace(/[^a-zA-Z ]/g, '').trim().split(/\s+/)[0] || '',
+      lastName: user.name.replace(/[^a-zA-Z ]/g, '').trim().split(/\s+/).slice(1).join(' '),
+      email: user.email,
+      phone: user.phone || '',
+      lifetime: Math.max(3, Math.min(remainingMinutes, 120 * 24 * 60)),
+    }
+  })
+
+  if ('cached' in prepared) {
+    return NextResponse.json({ success: true, status: 'PENDING', payment_method: 'KHQR', ...prepared.cached })
+  }
+
+  try {
+    const qr = await createPayWayQr(prepared)
+    const responseData = {
+      tran_id: qr.tranId,
+      qr_string: qr.qrString,
+      qr_image: qr.qrImage,
+      abapay_deeplink: qr.abapayDeeplink,
+      amount: qr.amount,
+      currency: qr.currency,
+      expires_at: new Date(Date.now() + prepared.lifetime * 60_000).toISOString(),
+    }
+
+    await db.rentalPaymentAttempt.update({
+      where: { id: prepared.attemptId },
+      data: { providerReference: qr.tranId, providerData: JSON.stringify(responseData) },
+    })
+
+    return NextResponse.json({
+      success: true,
+      status: 'PENDING',
+      payment_method: 'KHQR',
+      ...responseData,
+    })
+  } catch (error) {
+    await db.$transaction(async (tx) => {
+      await tx.rentalPaymentAttempt.update({
+        where: { id: prepared.attemptId },
+        data: { status: 'FAILED', failureReason: error instanceof Error ? error.message : 'PayWay QR request failed' },
+      })
+      await tx.rentalPaymentOrder.update({
+        where: { id: prepared.paymentOrderId },
+        data: { paymentStatus: 'FAILED' },
+      })
+    })
+    throw error
+  }
+}
 
 export async function POST(
   req: NextRequest,
@@ -18,6 +160,10 @@ export async function POST(
       bank_transfer_reference,
       idempotency_key = req.headers.get('idempotency-key') || body.idempotency_key,
     } = body
+
+    if (method === 'KHQR') {
+      return await startPayWayQr(id, user, idempotency_key)
+    }
 
     const now = new Date()
 

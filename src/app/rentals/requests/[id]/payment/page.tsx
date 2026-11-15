@@ -43,18 +43,22 @@ export default function RentalPaymentCheckoutPage() {
   const [paymentMethod, setPaymentMethod] = useState<'CARD' | 'KHQR' | 'BANK_TRANSFER' | 'CASH'>('CARD')
   const [bankRef, setBankRef] = useState('')
   const [cashNote, setCashNote] = useState('')
-  const [idempotencyKey, setIdempotencyKey] = useState('')
+  const [idempotencyKey] = useState(
+    () => `PAY-IDEM-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`
+  )
   const [copiedBank, setCopiedBank] = useState(false)
+  const [paywayQr, setPaywayQr] = useState<{
+    tran_id: string
+    qr_image: string
+    qr_string: string
+    abapay_deeplink: string | null
+  } | null>(null)
 
   // Card form state
   const [cardNumber, setCardNumber] = useState('4242 •••• •••• 4242')
   const [cardExpiry, setCardExpiry] = useState('12/28')
   const [cardCvc, setCardCvc] = useState('•••')
   const [cardName, setCardName] = useState('Sophea Chan')
-
-  useEffect(() => {
-    setIdempotencyKey(`PAY-IDEM-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`)
-  }, [])
 
   // Fetch Payment Summary
   const { data, isLoading, error, refetch } = useQuery({
@@ -69,6 +73,25 @@ export default function RentalPaymentCheckoutPage() {
     },
     refetchInterval: 10000,
   })
+
+  const paywayStatusQuery = useQuery({
+    queryKey: ['payway-payment-status', id, paywayQr?.tran_id],
+    enabled: Boolean(paywayQr),
+    queryFn: async () => {
+      const res = await fetch(`/api/me/rental-requests/${id}/payment-status`, { cache: 'no-store' })
+      const status = await res.json()
+      if (!res.ok) throw new Error(status.error || 'Unable to verify PayWay payment')
+      return status
+    },
+    refetchInterval: paywayQr ? 5000 : false,
+  })
+
+  useEffect(() => {
+    if (paywayStatusQuery.data?.payment_status === 'PAID') {
+      toast.success('PayWay payment confirmed! Rental reserved.')
+      router.push(`/rentals/requests/${id}/receipt`)
+    }
+  }, [id, paywayStatusQuery.data?.payment_status, router])
 
   // Payment Attempt Mutation
   const paymentMutation = useMutation({
@@ -94,7 +117,15 @@ export default function RentalPaymentCheckoutPage() {
       return resData
     },
     onSuccess: (resData) => {
-      if (resData.status === 'PAID') {
+      if (resData.payment_method === 'KHQR' && resData.status === 'PENDING') {
+        setPaywayQr({
+          tran_id: resData.tran_id,
+          qr_image: resData.qr_image,
+          qr_string: resData.qr_string,
+          abapay_deeplink: resData.abapay_deeplink,
+        })
+        toast.success('PayWay QR created. Scan it to complete payment.')
+      } else if (resData.status === 'PAID') {
         toast.success('Payment captured! Rental confirmed.')
         router.push(`/rentals/requests/${id}/receipt`)
       } else if (resData.payment_method === 'CASH' || paymentMethod === 'CASH') {
@@ -389,15 +420,51 @@ export default function RentalPaymentCheckoutPage() {
 
                       {paymentMethod === 'KHQR' && (
                         <div className="mt-3 pt-3 border-t border-border flex flex-col items-center p-3 bg-white dark:bg-slate-900 rounded-lg">
-                          <div className="w-36 h-36 bg-slate-100 dark:bg-slate-800 rounded-lg border flex items-center justify-center p-2 mb-2">
-                            <QrCode className="w-28 h-28 text-slate-800 dark:text-slate-200" />
+                          <div className="w-52 h-52 bg-white rounded-lg border flex items-center justify-center p-2 mb-2">
+                            {paywayQr ? (
+                              <img src={paywayQr.qr_image} alt="PayWay KHQR payment code" className="h-full w-full object-contain" />
+                            ) : (
+                              <QrCode className="w-28 h-28 text-slate-300" />
+                            )}
                           </div>
                           <span className="font-mono font-bold text-xs text-foreground">
-                            Scan to Pay ${breakdown.total_due.toFixed(2)}
+                            {paywayQr ? 'Scan this PayWay QR to pay' : `Pay $${breakdown.total_due.toFixed(2)}`}
                           </span>
                           <span className="text-[10px] text-muted-foreground mt-0.5">
-                            Merchant: RentHub Enterprise Co., Ltd.
+                            {paywayQr ? `Transaction ${paywayQr.tran_id}` : 'ABA PAY or another KHQR banking app'}
                           </span>
+                          {paywayQr?.abapay_deeplink && (
+                            <a href={paywayQr.abapay_deeplink} className="mt-2 text-xs font-semibold text-emerald-700 underline">
+                              Open ABA Mobile
+                            </a>
+                          )}
+                          {paywayQr && (
+                            <div className="mt-3 flex items-center gap-2 text-[11px] text-muted-foreground" aria-live="polite">
+                              {paywayStatusQuery.data?.payment_status === 'REQUIRES_REVIEW' ? (
+                                <span>Payment received; support is reviewing the transaction.</span>
+                              ) : paywayStatusQuery.data?.payment_status === 'FAILED' ||
+                                paywayStatusQuery.data?.payment_status === 'DECLINED' ||
+                                paywayStatusQuery.data?.payment_status === 'CANCELLED' ? (
+                                <span className="text-destructive">This QR was not paid. Generate a new QR to try again.</span>
+                              ) : (
+                                <>
+                                  <Loader2 className="h-3.5 w-3.5 animate-spin text-emerald-600" />
+                                  Waiting for PayWay to confirm payment…
+                                </>
+                              )}
+                            </div>
+                          )}
+                          {paywayQr && ['FAILED', 'DECLINED', 'CANCELLED'].includes(paywayStatusQuery.data?.payment_status) && (
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              className="mt-2"
+                              onClick={() => setPaywayQr(null)}
+                            >
+                              Generate a new QR
+                            </Button>
+                          )}
                         </div>
                       )}
                     </div>
@@ -529,6 +596,7 @@ export default function RentalPaymentCheckoutPage() {
                   disabled={
                     isHoldExpired ||
                     paymentMutation.isPending ||
+                    (paymentMethod === 'KHQR' && Boolean(paywayQr)) ||
                     (paymentMethod === 'BANK_TRANSFER' && !bankRef.trim())
                   }
                   className="w-full h-12 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-base shadow-sm gap-2 transition-all mt-4"
@@ -542,6 +610,11 @@ export default function RentalPaymentCheckoutPage() {
                     <>
                       <Banknote className="h-4 w-4" />
                       Confirm Cash on Pickup (${breakdown.total_due.toFixed(2)})
+                    </>
+                  ) : paymentMethod === 'KHQR' && paywayQr ? (
+                    <>
+                      <Clock className="h-4 w-4" />
+                      Waiting for PayWay Confirmation
                     </>
                   ) : (
                     <>

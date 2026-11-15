@@ -519,6 +519,7 @@ model RentalPaymentAttempt {
   currency          String             @default("USD")
   idempotencyKey    String?
   failureReason     String?
+  providerData      String?            @db.Text
   createdAt         DateTime           @default(now())
 
   paymentOrder      RentalPaymentOrder @relation(fields: [paymentOrderId], references: [id], onDelete: Cascade)

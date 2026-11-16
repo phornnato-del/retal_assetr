@@ -18,6 +18,7 @@ import {
   ArrowLeft,
   DollarSign,
   FileText,
+  CreditCard,
 } from 'lucide-react'
 import { Header } from '@/components/rental/Header'
 import { Footer } from '@/components/rental/Footer'
@@ -28,7 +29,7 @@ import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { Label } from '@/components/ui/label'
 import { toast } from 'sonner'
 
-type PaymentMethod = 'KHQR' | 'BANK_TRANSFER' | 'CASH'
+type PaymentMethod = 'CARD' | 'KHQR' | 'BANK_TRANSFER' | 'CASH'
 
 export default function RentalPaymentCheckoutPage() {
   const { id } = useParams<{ id: string }>()
@@ -37,6 +38,13 @@ export default function RentalPaymentCheckoutPage() {
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('KHQR')
   const [bankRef, setBankRef] = useState('')
   const [cashNote, setCashNote] = useState('')
+  const [stripeCheckoutSessionId] = useState(
+    () => typeof window !== 'undefined' &&
+      new URLSearchParams(window.location.search).get('stripe') === 'success'
+      ? new URLSearchParams(window.location.search).get('session_id')
+      : null
+  )
+  const stripeCheckoutReturned = Boolean(stripeCheckoutSessionId)
   const [clockNow, setClockNow] = useState(() => Date.now())
   const [idempotencyKey] = useState(
     () => `PAY-IDEM-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`
@@ -71,23 +79,32 @@ export default function RentalPaymentCheckoutPage() {
   })
 
   const paywayStatusQuery = useQuery({
-    queryKey: ['payway-payment-status', id, paywayQr?.tran_id],
-    enabled: Boolean(paywayQr) && qrSecondsRemaining !== 0,
+    queryKey: ['payment-status', id, paywayQr?.tran_id, stripeCheckoutSessionId],
+    enabled: (Boolean(paywayQr) && qrSecondsRemaining !== 0) || stripeCheckoutReturned,
     queryFn: async () => {
-      const res = await fetch(`/api/me/rental-requests/${id}/payment-status`, { cache: 'no-store' })
+      const query = stripeCheckoutSessionId
+        ? `?session_id=${encodeURIComponent(stripeCheckoutSessionId)}`
+        : ''
+      const res = await fetch(`/api/me/rental-requests/${id}/payment-status${query}`, { cache: 'no-store' })
       const status = await res.json()
       if (!res.ok) throw new Error(status.error || 'Unable to verify PayWay payment')
       return status
     },
-    refetchInterval: paywayQr && qrSecondsRemaining !== 0 ? 5000 : false,
+    refetchInterval: ((paywayQr && qrSecondsRemaining !== 0) || stripeCheckoutReturned) ? 5000 : false,
   })
+
+  const stripePaymentStatus = paywayStatusQuery.data?.payment_status
+  const stripePaymentPending = stripeCheckoutReturned &&
+    !['FAILED', 'EXPIRED'].includes(stripePaymentStatus)
 
   useEffect(() => {
     if (paywayStatusQuery.data?.payment_status === 'PAID') {
-      toast.success('PayWay payment confirmed! Rental reserved.')
+      toast.success(stripeCheckoutReturned
+        ? 'Stripe card payment confirmed! Rental reserved.'
+        : 'PayWay payment confirmed! Rental reserved.')
       router.push(`/rentals/requests/${id}/receipt`)
     }
-  }, [id, paywayStatusQuery.data?.payment_status, router])
+  }, [id, paywayStatusQuery.data?.payment_status, router, stripeCheckoutReturned])
 
   useEffect(() => {
     if (!paywayQr?.expires_at) return
@@ -123,10 +140,15 @@ export default function RentalPaymentCheckoutPage() {
           !Number.isFinite(Date.parse(resData.expires_at)))) {
         throw new Error('ABA PayWay did not return a payment QR.')
       }
+      if (paymentMethod === 'CARD' && (resData.payment_method !== 'CARD' || !resData.checkout_url)) {
+        throw new Error('Stripe did not return a secure Checkout URL.')
+      }
       return resData
     },
     onSuccess: (resData) => {
-      if (resData.payment_method === 'KHQR') {
+      if (resData.payment_method === 'CARD') {
+        window.location.assign(resData.checkout_url)
+      } else if (resData.payment_method === 'KHQR') {
         setClockNow(Date.now())
         setPaywayQr({
           tran_id: resData.tran_id,
@@ -334,20 +356,48 @@ export default function RentalPaymentCheckoutPage() {
                 </CardDescription>
               </CardHeader>
               <CardContent className="pt-4 space-y-4">
+                {stripePaymentPending && (
+                  <p className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900" aria-live="polite">
+                    {stripePaymentStatus === 'REQUIRES_REVIEW'
+                      ? 'Stripe received your payment. The rental team is reviewing it; please do not pay again.'
+                      : 'Waiting for Stripe to confirm your payment. Please do not start another payment.'}
+                  </p>
+                )}
                 <RadioGroup
                   value={paymentMethod}
                   disabled={
-                    Boolean(paywayQr) &&
-                    qrSecondsRemaining !== 0 &&
-                    !['FAILED', 'DECLINED', 'CANCELLED'].includes(paywayStatusQuery.data?.payment_status)
+                    stripePaymentPending ||
+                    (Boolean(paywayQr) &&
+                      qrSecondsRemaining !== 0 &&
+                      !['FAILED', 'DECLINED', 'CANCELLED'].includes(paywayStatusQuery.data?.payment_status))
                   }
                   onValueChange={(value) => {
-                    if (value === 'KHQR' || value === 'BANK_TRANSFER' || value === 'CASH') {
+                    if (value === 'CARD' || value === 'KHQR' || value === 'BANK_TRANSFER' || value === 'CASH') {
                       setPaymentMethod(value)
                     }
                   }}
                   className="space-y-2"
                 >
+                  <Label
+                    htmlFor="pay-card"
+                    className={`flex cursor-pointer items-start gap-3 rounded-xl border p-3.5 transition ${
+                      paymentMethod === 'CARD'
+                        ? 'border-emerald-600 bg-emerald-50/40 dark:bg-emerald-950/20'
+                        : 'border-border hover:bg-muted/30'
+                    }`}
+                  >
+                    <RadioGroupItem value="CARD" id="pay-card" className="mt-0.5" />
+                    <span className="flex-1">
+                      <span className="flex items-center gap-2 text-xs font-bold">
+                        <CreditCard className="h-4 w-4 text-emerald-600" />
+                        Credit / debit card (Stripe)
+                      </span>
+                      <span className="mt-1 block text-xs font-normal text-muted-foreground">
+                        Pay securely on Stripe Checkout. Your card details are never stored here.
+                      </span>
+                    </span>
+                  </Label>
+
                   <Label
                     htmlFor="pay-khqr"
                     className={`flex cursor-pointer items-start gap-3 rounded-xl border p-3.5 transition ${
@@ -524,6 +574,7 @@ export default function RentalPaymentCheckoutPage() {
                   disabled={
                     isHoldExpired ||
                     paymentMutation.isPending ||
+                    stripePaymentPending ||
                     (paymentMethod === 'KHQR' && Boolean(paywayQr)) ||
                     (paymentMethod === 'BANK_TRANSFER' && !bankRef.trim())
                   }

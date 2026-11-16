@@ -137,7 +137,8 @@ RentHub implements a **role-segregated, stateless JWT authentication architectur
 | 100| `GET` | `/api/admin/audit` | 🔴 ADMIN | `role: admin` | Comprehensive audit trail logs |
 | 101| `GET` | `/api/admin/stats` | 🔴 ADMIN | `role: admin` | Executive KPI dashboard metrics |
 | **System Integrations & Legacy** | | | | | |
-| 102| `POST` | `/api/payment-providers/[provider]/webhook` | 🟡 WEBHOOK | Provider Secret / Sig | Payment gateway webhook listener |
+| 102| `POST` | `/api/payment-providers/[provider]/webhook` | 🟡 WEBHOOK | Provider Secret / Sig | Generic payment gateway webhook listener |
+| 102a| `POST` | `/api/payment-providers/stripe/webhook` | 🟡 WEBHOOK | Stripe signature | Stripe Checkout payment events |
 | 103| `POST` | `/api/internal/rental-reservations/finalize/[id]`| 🟡 INTERNAL| Internal Token | Automated reservation finalization |
 | 104| `GET` | `/api/bookings` | 🔵 CLIENT | `role: client` | Legacy bookings list |
 | 105| `POST` | `/api/bookings` | 🔵 CLIENT | `role: client` | Legacy booking create |
@@ -300,16 +301,19 @@ RentHub implements a **role-segregated, stateless JWT authentication architectur
 
 #### `POST /api/me/rental-requests/[id]/payment-attempts`
 - **Auth Level:** 🔵 Client Auth (`renthub_client_session`)
-- **Description:** Submits payment attempt. For `CASH` or `BANK_TRANSFER`, transitions order to `PROCESSING` awaiting admin verification. For immediate gateway simulation (`KHQR`/`CARD`), transitions order to `PAID` and triggers reservation confirmation.
+- **Description:** Submits a payment attempt. `CARD` creates a Stripe Checkout session; the signed Stripe webhook verifies settlement before confirming the request. `KHQR` uses PayWay verification. `CASH` and `BANK_TRANSFER` await staff verification.
 - **Request Body:**
   ```json
   {
-    "method": "CASH",
-    "amount": 725.0,
-    "providerReference": "Cash payable at counter"
+    "method": "CARD"
   }
   ```
-- **Response:** `200 OK`
+- **CARD Response:** `200 OK` with `status: "PENDING"`, `payment_method: "CARD"`, and a Stripe-hosted `checkout_url`. The order becomes paid only after a verified webhook.
+- **CASH / BANK_TRANSFER Response:** `200 OK` with the selected method and a status awaiting staff verification.
+
+#### `POST /api/payment-providers/stripe/webhook`
+- **Auth Level:** Stripe webhook signature (`stripe-signature`), verified against the raw request body.
+- **Description:** Handles Stripe Checkout completion, expiration, and asynchronous payment events. Successful payment is checked against the order amount, currency, and active inventory hold before issuing a receipt.
   ```json
   {
     "ok": true,

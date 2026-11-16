@@ -1,9 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { Prisma } from '@prisma/client'
 import { db } from '@/lib/db'
 import { getCurrentUser } from '@/lib/auth'
 import { finalizeBookingReservation } from '@/lib/reservations'
 import { randomBytes } from 'node:crypto'
 import { createPayWayQr, getPayWayCacheContext } from '@/lib/payway'
+import { getAppBaseUrl, getStripeClient } from '@/lib/stripe'
 
 async function startPayWayQr(
   requestId: string,
@@ -158,6 +160,177 @@ async function startPayWayQr(
   }
 }
 
+async function startStripeCheckout(
+  requestId: string,
+  user: NonNullable<Awaited<ReturnType<typeof getCurrentUser>>>,
+  idempotencyKey?: string
+) {
+  const stripe = getStripeClient()
+  const appBaseUrl = getAppBaseUrl()
+  const prepared = await db.$transaction(async (tx) => {
+    const request = await tx.rentalRequest.findFirst({
+      where: { OR: [{ id: requestId }, { requestNo: requestId }], renterId: user.id },
+      include: {
+        quoteSnapshot: true,
+        inventoryHold: true,
+        listing: true,
+        paymentOrder: { include: { attempts: { orderBy: { createdAt: 'desc' } } } },
+      },
+    })
+
+    if (!request) throw new Error('NOT_FOUND: Rental request not found')
+    if (request.status !== 'APPROVED_AWAITING_PAYMENT' && request.status !== 'PAYMENT_PENDING_VERIFICATION') {
+      throw new Error(`CONFLICT: Request is currently in "${request.status}". Payment can only be initialized on approved requests.`)
+    }
+
+    const hold = request.inventoryHold
+    if (!hold || hold.status !== 'ACTIVE' || new Date(hold.expiresAt) <= new Date()) {
+      throw new Error('HOLD_EXPIRED: The inventory hold deadline for this approval has elapsed.')
+    }
+    if (!request.quoteSnapshot) throw new Error('Commercial quote snapshot missing')
+
+    const quote = request.quoteSnapshot
+    if (quote.currency.toUpperCase() !== 'USD') {
+      throw new Error('VALIDATION: Stripe Checkout currently supports USD rental payments only.')
+    }
+
+    let existing = request.paymentOrder?.attempts.find(
+      (attempt) => attempt.provider === 'STRIPE_CHECKOUT' && attempt.status === 'PROCESSING'
+    )
+    if (existing?.providerData) {
+      const savedSession = JSON.parse(existing.providerData) as {
+        checkout_url?: string
+        expires_at?: string
+      }
+      if (
+        savedSession.checkout_url &&
+        savedSession.expires_at &&
+        Date.parse(savedSession.expires_at) > Date.now()
+      ) {
+        return { cachedUrl: savedSession.checkout_url }
+      }
+      if (savedSession.expires_at && Date.parse(savedSession.expires_at) <= Date.now()) {
+        await tx.rentalPaymentAttempt.update({
+          where: { id: existing.id },
+          data: { status: 'CANCELLED', failureReason: 'Stripe Checkout session expired.' },
+        })
+        existing = undefined
+      }
+    }
+
+    const paymentOrder = await tx.rentalPaymentOrder.upsert({
+      where: { requestId: request.id },
+      update: {
+        currency: quote.currency,
+        rentalAmount: quote.rentalSubtotal + quote.deliveryFee + quote.estimatedTax,
+        depositAmount: quote.securityDeposit,
+        deliveryFee: quote.deliveryFee,
+        tax: quote.estimatedTax,
+        totalDue: quote.totalPayable,
+        dueAt: hold.expiresAt,
+        paymentStatus: 'PROCESSING',
+      },
+      create: {
+        requestId: request.id,
+        currency: quote.currency,
+        rentalAmount: quote.rentalSubtotal + quote.deliveryFee + quote.estimatedTax,
+        depositAmount: quote.securityDeposit,
+        deliveryFee: quote.deliveryFee,
+        tax: quote.estimatedTax,
+        totalDue: quote.totalPayable,
+        dueAt: hold.expiresAt,
+        paymentStatus: 'PROCESSING',
+      },
+    })
+    const attemptNo = (request.paymentOrder?.attempts.reduce(
+      (max, attempt) => Math.max(max, attempt.attemptNo),
+      0
+    ) || 0) + 1
+    const attempt = existing || await tx.rentalPaymentAttempt.create({
+      data: {
+        paymentOrderId: paymentOrder.id,
+        method: 'CARD',
+        provider: 'STRIPE_CHECKOUT',
+        amount: quote.totalPayable,
+        currency: quote.currency,
+        idempotencyKey: idempotencyKey || null,
+        attemptNo,
+        status: 'PROCESSING',
+      },
+    })
+
+    return {
+      attemptId: attempt.id,
+      paymentOrderId: paymentOrder.id,
+      requestId: request.id,
+      requestNo: request.requestNo,
+      listingName: request.listing.name,
+      amount: quote.totalPayable,
+      currency: quote.currency.toLowerCase(),
+    }
+  }, {
+    timeout: 15_000,
+    isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+  })
+
+  if ('cachedUrl' in prepared) {
+    return NextResponse.json({
+      success: true,
+      status: 'PENDING',
+      payment_method: 'CARD',
+      checkout_url: prepared.cachedUrl,
+    })
+  }
+
+  const metadata = {
+    paymentOrderId: prepared.paymentOrderId,
+    paymentAttemptId: prepared.attemptId,
+    requestId: prepared.requestId,
+  }
+  const session = await stripe.checkout.sessions.create({
+    mode: 'payment',
+    customer_email: user.email,
+    client_reference_id: prepared.attemptId,
+    line_items: [{
+      quantity: 1,
+      price_data: {
+        currency: prepared.currency,
+        unit_amount: Math.round(prepared.amount * 100),
+        product_data: {
+          name: prepared.listingName,
+          description: `Rental request ${prepared.requestNo}`,
+        },
+      },
+    }],
+    metadata,
+    payment_intent_data: { metadata },
+    success_url: `${appBaseUrl}/rentals/requests/${encodeURIComponent(requestId)}/payment?stripe=success&session_id={CHECKOUT_SESSION_ID}`,
+    cancel_url: `${appBaseUrl}/rentals/requests/${encodeURIComponent(requestId)}/payment?stripe=cancelled`,
+  }, {
+    idempotencyKey: `rental-checkout-${prepared.attemptId}`,
+  })
+
+  if (!session.url) throw new Error('Stripe did not return a Checkout URL.')
+
+  await db.rentalPaymentAttempt.update({
+    where: { id: prepared.attemptId },
+    data: {
+      providerReference: session.id,
+      providerData: JSON.stringify({
+        checkout_url: session.url,
+        expires_at: new Date(session.expires_at * 1000).toISOString(),
+      }),
+    },
+  })
+
+  return NextResponse.json({
+    success: true,
+    status: 'PENDING',
+    payment_method: 'CARD',
+    checkout_url: session.url,
+  })
+}
+
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -173,6 +346,14 @@ export async function POST(
       bank_transfer_reference,
       idempotency_key = req.headers.get('idempotency-key') || body.idempotency_key,
     } = body
+
+    if (!['CARD', 'KHQR', 'BANK_TRANSFER', 'CASH'].includes(method)) {
+      return NextResponse.json({ error: 'Unsupported payment method.' }, { status: 400 })
+    }
+
+    if (method === 'CARD') {
+      return await startStripeCheckout(id, user, idempotency_key)
+    }
 
     if (method === 'KHQR') {
       return await startPayWayQr(id, user, idempotency_key)
@@ -396,112 +577,15 @@ export async function POST(
         }
       }
 
-      // Online instant capture (CARD or KHQR simulated provider webhook settlement)
-      const providerRef = `TXN-${Date.now()}-${Math.random().toString(36).substring(2, 8).toUpperCase()}`
-
-      // Create succeeded attempt
-      await tx.rentalPaymentAttempt.create({
-        data: {
-          paymentOrderId: paymentOrder.id,
-          method,
-          provider: method === 'KHQR' ? 'BAKONG_KHQR' : 'STRIPE_GATEWAY',
-          providerReference: providerRef,
-          amount: totalPayable,
-          currency: quote.currency,
-          idempotencyKey: idempotency_key || null,
-          status: 'SUCCEEDED',
-        },
-      })
-
-      // Generate Receipt Number (e.g. REC-2026-000001)
-      const currentYear = new Date().getFullYear()
-      const receiptCount = await tx.rentalPaymentReceipt.count()
-      const receiptNo = `REC-${currentYear}-${(receiptCount + 1).toString().padStart(6, '0')}`
-
-      // Create Receipt
-      const receipt = await tx.rentalPaymentReceipt.create({
-        data: {
-          paymentOrderId: paymentOrder.id,
-          receiptNo,
-          rentalAmount: rentalCharge,
-          depositAmount,
-          deliveryFee: quote.deliveryFee,
-          tax: quote.estimatedTax,
-          totalCaptured: totalPayable,
-          currency: quote.currency,
-          paymentMethod: method,
-          issuedAt: now,
-        },
-      })
-
-      // Update Order to PAID
-      await tx.rentalPaymentOrder.update({
-        where: { id: paymentOrder.id },
-        data: {
-          paymentStatus: 'PAID',
-          paidAt: now,
-        },
-      })
-
-      // Create Deposit Ledger entry (Refundable deposit liability tracking)
-      await tx.rentalDepositLedger.upsert({
-        where: { requestId: request.id },
-        update: {
-          collectedAmount: depositAmount,
-          heldAmount: depositAmount,
-          liabilityBalance: depositAmount,
-          status: 'HELD',
-        },
-        create: {
-          requestId: request.id,
-          currency: quote.currency,
-          collectedAmount: depositAmount,
-          heldAmount: depositAmount,
-          liabilityBalance: depositAmount,
-          status: 'HELD',
-        },
-      })
-
-      // Update Rental Request to PAYMENT_CONFIRMED
-      await tx.rentalRequest.update({
-        where: { id: request.id },
-        data: {
-          status: 'PAYMENT_CONFIRMED',
-          version: request.version + 1,
-        },
-      })
-
-      // Record Audit Event
-      await tx.rentalRequestEvent.create({
-        data: {
-          requestId: request.id,
-          actorId: user.id,
-          actorName: user.name,
-          actorType: 'RENTER',
-          action: 'PAYMENT_CONFIRMED',
-          fromStatus: request.status,
-          toStatus: 'PAYMENT_CONFIRMED',
-          reason: `Verified ${method} payment captured: $${totalPayable.toFixed(2)} (Receipt: ${receiptNo})`,
-        },
-      })
-
-      return {
-        status: 'PAID',
-        request_id: request.id,
-        request_no: request.requestNo,
-        receipt_no: receiptNo,
-        total_captured: totalPayable,
-        currency: quote.currency,
-        paid_at: now.toISOString(),
-        message: 'Payment and refundable security deposit successfully captured.',
-      }
+      throw new Error('VALIDATION: Unsupported payment method.')
     })
 
     // Step 06 Handoff: Finalize booking reservation committed inventory
-    let bookingResult = null
-    if (result.status === 'PAID') {
+    let bookingResult: Awaited<ReturnType<typeof finalizeBookingReservation>> | null = null
+    const paidRequestId = 'request_id' in result ? result.request_id : null
+    if (result.status === 'PAID' && typeof paidRequestId === 'string') {
       try {
-        bookingResult = await finalizeBookingReservation(result.request_id, {
+        bookingResult = await finalizeBookingReservation(paidRequestId, {
           id: user.id,
           name: user.name,
           role: 'RENTER',
@@ -518,10 +602,21 @@ export async function POST(
       reservation_id: bookingResult?.reservation?.id || null,
     })
   } catch (error: any) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2034') {
+      return NextResponse.json(
+        { error: 'Payment checkout is already being initialized. Please retry.' },
+        { status: 409 }
+      )
+    }
+
     const msg = error.message || 'Payment processing failed'
     console.error('Error processing payment attempt:', msg)
 
-    const statusCode = msg.startsWith('NOT_FOUND')
+    const statusCode = msg.startsWith('Stripe is not configured') ||
+      msg.startsWith('Stripe webhook is not configured') ||
+      msg.startsWith('Application URL is not configured')
+      ? 503
+      : msg.startsWith('NOT_FOUND')
       ? 404
       : msg.startsWith('HOLD_EXPIRED') || msg.startsWith('CONFLICT')
       ? 409

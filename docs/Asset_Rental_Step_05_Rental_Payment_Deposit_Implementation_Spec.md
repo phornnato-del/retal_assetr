@@ -7,13 +7,13 @@
 
 ## 1. Scope and Decisions
 
-Payment here covers the **rental charge** and any **refundable security deposit**, plus approved taxes, mandatory service/delivery fees. The company must select locally supported payment providers and business/legal policy before integration; do not assume any specific international gateway serves the company's market.
+Payment here covers the **rental charge** and any **refundable security deposit**, plus approved taxes, mandatory service/delivery fees. The company must select locally supported payment providers and business/legal policy before integration; do not assume any specific international gateway serves the company's market. This implementation provides Stripe Checkout for USD card payments, subject to the merchant's Stripe account and local availability.
 
 ### Supported Payment Modes
 
 | Mode | Flow | MVP choice |
 |---|---|---|
-| Online processor | Provider checkout → verified callback/webhook → reconcile | Choose one supported gateway |
+| Online processor | Provider checkout → verified callback/webhook → reconcile | Stripe Checkout (USD) and ABA PayWay KHQR |
 | Bank transfer / QR | Display reference → admin or trusted bank feed verifies funds | Optional MVP fallback |
 | Cash at counter | Staff records receipt after actually receiving cash | Only if pickup policy permits |
 | Deposit charge then refund | Collect refundable deposit as distinct liability | Recommended simple deposit model |

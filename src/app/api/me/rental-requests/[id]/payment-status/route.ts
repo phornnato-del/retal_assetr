@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { getCurrentUser } from '@/lib/auth'
 import { verifyAndSettlePayWayTransaction } from '@/lib/payway-settlement'
+import { getStripeClient } from '@/lib/stripe'
+import { failStripeCheckout, settleStripeCheckout } from '@/lib/stripe-settlement'
 
 export async function GET(
   req: NextRequest,
@@ -13,7 +15,7 @@ export async function GET(
 
     const { id } = await params
 
-    let request = await db.rentalRequest.findFirst({
+    const loadedRequest = await db.rentalRequest.findFirst({
       where: {
         OR: [{ id }, { requestNo: id }],
         renterId: user.id,
@@ -30,9 +32,10 @@ export async function GET(
       },
     })
 
-    if (!request) {
+    if (!loadedRequest) {
       return NextResponse.json({ error: 'Rental request not found' }, { status: 404 })
     }
+    let request = loadedRequest
 
     const pendingPayWayAttempt = request.paymentOrder?.attempts.find(
       (attempt) => attempt.provider === 'ABA_PAYWAY' && attempt.status === 'PROCESSING' && attempt.providerReference
@@ -40,7 +43,7 @@ export async function GET(
     if (pendingPayWayAttempt?.providerReference) {
       try {
         await verifyAndSettlePayWayTransaction(pendingPayWayAttempt.providerReference)
-        request = await db.rentalRequest.findUnique({
+        const refreshedRequest = await db.rentalRequest.findUnique({
           where: { id: request.id },
           include: {
             paymentOrder: {
@@ -50,11 +53,51 @@ export async function GET(
             inventoryHold: true,
           },
         })
-        if (!request) {
+        if (!refreshedRequest) {
           return NextResponse.json({ error: 'Rental request not found' }, { status: 404 })
         }
+        request = refreshedRequest
       } catch (error) {
         console.error('PayWay status verification failed:', error)
+      }
+    }
+
+    const stripeSessionId = req.nextUrl.searchParams.get('session_id')
+    if (stripeSessionId) {
+      const stripeAttempt = request.paymentOrder?.attempts.find(
+        (attempt) => attempt.provider === 'STRIPE_CHECKOUT' &&
+          attempt.providerReference === stripeSessionId
+      )
+
+      if (!stripeAttempt) {
+        return NextResponse.json({ error: 'Stripe checkout session not found for this rental.' }, { status: 404 })
+      }
+
+      try {
+        const session = await getStripeClient().checkout.sessions.retrieve(stripeSessionId)
+        if (session.status === 'expired') {
+          await failStripeCheckout(session, 'Stripe Checkout session expired.')
+        } else {
+          await settleStripeCheckout(session)
+        }
+
+        const refreshedRequest = await db.rentalRequest.findUnique({
+          where: { id: request.id },
+          include: {
+            paymentOrder: {
+              include: { attempts: { orderBy: { createdAt: 'desc' } }, receipt: true },
+            },
+            depositLedger: true,
+            inventoryHold: true,
+          },
+        })
+        if (!refreshedRequest) {
+          return NextResponse.json({ error: 'Rental request not found' }, { status: 404 })
+        }
+        request = refreshedRequest
+      } catch (error) {
+        console.error('Stripe checkout status reconciliation failed:', error)
+        return NextResponse.json({ error: 'Unable to verify Stripe Checkout payment.' }, { status: 502 })
       }
     }
 

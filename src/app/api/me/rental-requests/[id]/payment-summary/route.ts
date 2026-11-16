@@ -93,9 +93,10 @@ export async function GET(
       },
       payment_order: request.paymentOrder || null,
       supported_methods: [
-        { id: 'CARD', name: 'Credit / Debit Card', description: 'Instant processing via Visa, Mastercard, or UnionPay' },
+        { id: 'CARD', name: 'Credit / Debit Card', description: 'Secure hosted checkout powered by Stripe' },
         { id: 'KHQR', name: 'Bakong KHQR / ABA PAY', description: 'Instant mobile banking scan in KHR or USD' },
         { id: 'BANK_TRANSFER', name: 'Direct Bank Wire', description: 'Manual bank transfer with verification review' },
+        { id: 'CASH', name: 'Cash on pickup', description: 'Pay at the service counter during pickup' },
       ],
     })
   } catch (error: any) {

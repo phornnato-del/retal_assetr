@@ -81,3 +81,15 @@ PAYWAY_CALLBACK_URL="https://your-public-domain/api/payment-providers/payway/web
 ```
 
 Keep `PAYWAY_API_KEY` server-side; never expose it with a `NEXT_PUBLIC_` prefix. For local testing, PayWay cannot call a localhost callback URL, but the checkout also checks transaction status from the server. For deployment, configure a public HTTPS callback URL and whitelist its domain in the PayWay merchant profile. Use the production base URL and production credentials only after sandbox testing is complete.
+
+## Stripe card checkout
+
+Approved rental requests can also be paid by card through Stripe Checkout. Add your Stripe test keys and the app's public base URL to `.env`:
+
+```env
+STRIPE_SECRET_KEY="sk_test_..."
+STRIPE_WEBHOOK_SECRET="whsec_..."
+APP_URL="http://localhost:3000"
+```
+
+In the Stripe Dashboard (or Stripe CLI for local development), register `POST /api/payment-providers/stripe/webhook` for these events: `checkout.session.completed`, `checkout.session.expired`, `checkout.session.async_payment_failed`, and `checkout.session.async_payment_succeeded`. On return from Stripe, the app also retrieves the session directly from Stripe and reconciles it with the renter's payment order, so the browser redirect alone never marks an order paid. The signed webhook is still required to reconcile payments if the renter closes checkout before returning. Keep both Stripe keys server-side; never use a `NEXT_PUBLIC_` prefix or commit real credentials. This checkout currently accepts USD rental quotes.

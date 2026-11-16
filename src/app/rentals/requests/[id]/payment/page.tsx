@@ -416,7 +416,7 @@ export default function RentalPaymentCheckoutPage() {
                         <img
                           src={paywayQr.qr_image}
                           alt="ABA PayWay KHQR payment code"
-                          className="h-56 w-56 rounded-lg border bg-white object-contain p-2"
+                          className="h-64 w-64 max-w-full rounded-lg border bg-white object-contain p-2 sm:h-72 sm:w-72"
                         />
                         <p className="mt-3 text-sm font-bold">Scan to pay ${breakdown.total_due.toFixed(2)}</p>
                         <p className="mt-1 text-[11px] text-muted-foreground">
